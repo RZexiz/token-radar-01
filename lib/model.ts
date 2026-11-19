@@ -17,6 +17,13 @@
 //
 // No protocol name is ever special-cased: the same function scores every row. Every constant is stated
 // on the dashboard, every sector's terms are printed there, and each row's detail view shows the parts.
+//
+// The multiple is not asserted: it is measured. The snapshot's own live-token protocols carry both a
+// market cap and a TVL, so the multiple the market pays each sector is read off them (lib/calibrate.ts)
+// and only thin sectors fall back toward the snapshot median. The fee stays a stated sector assumption,
+// because no snapshot field carries a protocol's revenue.
+
+import { calibrateMultiples, fallbackMultiple, CALIBRATION_PRIOR_SAMPLES, type CalibratedMultiple } from './calibrate.ts';
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -69,7 +76,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by score. */
 export const EARLY_ROWS = 160;
@@ -132,10 +139,42 @@ export function sectorTerms(category: string | null): SectorTerms {
   return { fee_bps: 170, multiple: 16, note: 'the middle of the sector table: this category has no row of its own' };
 }
 
-/** The whole sector table, for the dashboard's model panel. */
-export function sectorTable(): { category: string; fee_bps: number; multiple: number; note: string }[] {
-  return Object.keys(SECTORS)
-    .map((c) => ({ category: c, fee_bps: SECTORS[c]!.fee_bps, multiple: SECTORS[c]!.multiple, note: SECTORS[c]!.note }))
+/** One sector's terms as the dashboard prints them: the assumed fee, the measured multiple, its evidence. */
+export interface SectorRow {
+  category: string;
+  fee_bps: number;
+  multiple: number;
+  note: string;
+  /** How many live-token protocols the multiple was measured on. */
+  samples: number;
+  /** The category's own median mcap/tvl, or null when nothing was measured. */
+  observed: number | null;
+  /** True when the multiple was shrunk toward the snapshot median for thin evidence. */
+  shrunk: boolean;
+}
+
+/**
+ * The whole sector table, for the dashboard's model panel. Every category the board actually scores is
+ * present, with the market-measured multiple when the snapshot has live protocols to measure it on.
+ */
+export function sectorTable(snapshot?: Snapshot): SectorRow[] {
+  const calibration = snapshot !== undefined ? calibrateMultiples(snapshot.protocols) : null;
+  const categories = new Set<string>(Object.keys(SECTORS));
+  if (calibration !== null) for (const c of calibration.byCategory.keys()) categories.add(c);
+  return [...categories]
+    .map((c) => {
+      const terms = sectorTerms(c);
+      const measured = calibration?.byCategory.get(c);
+      return {
+        category: c,
+        fee_bps: terms.fee_bps,
+        multiple: measured !== undefined ? Math.round(measured.multiple * 100) / 100 : terms.multiple,
+        note: terms.note,
+        samples: measured?.samples ?? 0,
+        observed: measured?.observed ?? null,
+        shrunk: measured?.shrunk ?? false,
+      };
+    })
     .sort((a, b) => b.multiple - a.multiple || b.fee_bps - a.fee_bps);
 }
 
@@ -216,7 +255,7 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
-  sectors: { category: string; fee_bps: number; multiple: number; note: string }[];
+  sectors: SectorRow[];
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -255,6 +294,8 @@ export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
+  calibration?: Map<string, CalibratedMultiple> | null,
+  snapshotMedian = 0,
 ): {
   implied: number;
   revenue: number;
@@ -266,9 +307,18 @@ export function impliedValue(
   liquidityMult: number;
   age: number | null;
   sectorNote: string;
+  multipleSamples: number;
+  multipleObserved: number | null;
 } {
   const terms = sectorTerms(protocol.category);
+  // The value a dollar of TVL commands comes from the market's own live protocols in this category. That
+  // ratio, mcap / tvl, needs no fee assumption: the market has already priced the book. The sector table's
+  // figure is the fallback only when the snapshot holds no live protocol in the category to measure on.
+  const measured = protocol.category !== null ? calibration?.get(protocol.category) : undefined;
+  const multiple = measured !== undefined ? measured.multiple : fallbackMultiple(snapshotMedian, terms.multiple);
   const age = ageDays(asOf, protocol.listed_at);
+  // The book's own earnings, at the sector's stated fee: a reference figure the row prints, not the
+  // multiplier path. It answers "what would this book earn a year", separate from "what is it worth".
   const revenue = (protocol.tvl_usd * terms.fee_bps) / 10_000;
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
@@ -280,18 +330,22 @@ export function impliedValue(
   const liquidityMult =
     model.liquidity_floor +
     Math.min(Math.log10(tvlRatio) / Math.log10(model.liquidity_ref_usd / 1_000_000), 1) * model.liquidity_range;
-  const implied = Math.max(1, Math.round(revenue * terms.multiple * growthMult * tenureMult * liquidityMult));
+  // Value = the book, priced at what its own sector's live tokens are worth per dollar of TVL, adjusted for
+  // how fast the book is growing, how long it has held it, and how much of it could actually be traded.
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * tenureMult * liquidityMult));
   return {
     implied,
     revenue,
     feeBps: terms.fee_bps,
-    multiple: terms.multiple,
+    multiple,
     growthPct,
     growthMult,
     tenureMult,
     liquidityMult,
     age,
     sectorNote: terms.note,
+    multipleSamples: measured?.samples ?? 0,
+    multipleObserved: measured?.observed ?? null,
   };
 }
 
@@ -316,6 +370,9 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
+  const calibrated = calibrateMultiples(snapshot.protocols);
+  const calibration = calibrated.byCategory;
+  const snapshotMedian = calibrated.snapshotMedian;
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug it names is on the board.
   for (const slug of snapshot.watchlist) {
@@ -326,12 +383,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   // protocol is never displaced by an early one.
   const early = snapshot.protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .map((p) => ({ p, implied: impliedValue(p, snapshot.as_of, model).implied }))
+    .map((p) => ({ p, implied: impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian).implied }))
     .sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1))
     .slice(0, EARLY_ROWS);
   for (const e of early) chosen.set(e.p.slug, e.p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model) }));
+  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian) }));
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -358,6 +415,14 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       liquidity_multiplier: round4(s.liquidityMult),
       age_days: s.age,
       sector_note: s.sectorNote,
+      multiple_samples: s.multipleSamples,
+      multiple_observed: s.multipleObserved,
+      multiple_source:
+        s.multipleSamples === 0
+          ? 'snapshot median: no live token in this category to measure on'
+          : s.multipleSamples < CALIBRATION_PRIOR_SAMPLES
+            ? 'measured on ' + s.multipleSamples + ' live token' + (s.multipleSamples === 1 ? '' : 's') + ', shrunk toward the snapshot median'
+            : 'measured on ' + s.multipleSamples + ' live tokens in this category',
     },
     farm_steps: farmSteps(s.p, s.age, s.implied).map(stepText),
   }));
@@ -525,7 +590,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
-    sectors: sectorTable(),
+    sectors: sectorTable(snapshot),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,

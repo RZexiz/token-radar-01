@@ -43,8 +43,8 @@
     var liquidity =
       model.liquidity_floor +
       Math.min(Math.log(tvlRatio) / Math.log(model.liquidity_ref_usd / 1e6), 1) * model.liquidity_range;
-    var revenue = (row.tvl_usd * row.fee_bps) / 10000;
-    return Math.max(1, Math.round(revenue * row.multiple * growthMult * tenure * liquidity));
+    // Value = the book, priced at what the sector's own live tokens are worth per dollar of TVL.
+    return Math.max(1, Math.round(row.tvl_usd * row.multiple * growthMult * tenure * liquidity));
   }
 
   function el(tag, attrs) {
@@ -363,11 +363,15 @@
 
   function modelPanel() {
     var m = DATA.model;
-    var sectorRows = DATA.sectors.slice(0, 28).map(function (s) {
+    var sectorRows = DATA.sectors.slice(0, 30).map(function (s) {
+      var evidence = s.samples === 0
+        ? 'snapshot median'
+        : s.samples + (s.samples === 1 ? ' live token' : ' live tokens') + (s.shrunk ? ', shrunk' : '');
       return el('tr', null,
         el('td', { text: s.category }),
         el('td', { class: 'num', text: (s.fee_bps / 100).toFixed(2) + '%' }),
-        el('td', { class: 'num', text: s.multiple + 'x' }),
+        el('td', { class: 'num', text: (Math.round(s.multiple * 100) / 100) + '×' }),
+        el('td', { class: 'num' + (s.samples === 0 ? ' weak' : ''), text: evidence }),
         el('td', { class: 'sub', text: s.note })
       );
     });
@@ -375,17 +379,19 @@
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        el('div', null, el('b', { text: 'revenue' }), ' = tvl_usd × FEE_BPS(category) / 10000'),
+        el('div', null, el('b', { text: 'multiple' }), ' = median( mcap / tvl ) over the snapshot\'s live tokens in that category'),
         el('div', null, el('b', { text: 'growth' }), ' = 1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 × ' + m.growth_weight),
         el('div', null, el('b', { text: 'tenure' }), ' = ' + m.tenure_floor + ' + min(age_days, ' + m.tenure_days + ') / ' + m.tenure_days + ' × ' + m.tenure_range),
         el('div', null, el('b', { text: 'liquidity' }), ' = ' + m.liquidity_floor + ' + min(log10(tvl / $1M) / log10($3B / $1M), 1) × ' + m.liquidity_range),
-        el('div', null, el('b', { text: 'implied' }), ' = max(1, round(revenue × multiple × growth × tenure × liquidity))')
+        el('div', null, el('b', { text: 'implied' }), ' = max(1, round(tvl_usd × multiple × growth × tenure × liquidity))')
       ),
-      el('p', { class: 'sub', text: 'TVL, seven-day growth and listing date come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Each sector carries its own revenue take and revenue multiple, because a lending market and a chain do not earn the same way.' }),
-      el('h3', { text: 'Sector terms' }),
+      el('p', { class: 'sub', text: 'TVL, seven-day growth and listing date come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      el('p', { class: 'sub', text: 'The multiple is measured, not assumed: the snapshot\'s own live-token protocols carry a market cap and a TVL, so mcap / tvl reads off what the market currently pays each sector per dollar of book. A category with fewer than six live tokens is shrunk toward the snapshot median, so one lucky sample never sets a sector\'s price. A category with none takes the snapshot median and says so.' }),
+      el('p', { class: 'sub', text: 'The fee figure is a stated assumption, not a measurement: no snapshot field carries a protocol\'s revenue, so what a book would earn a year is shown separately from what it is worth.' }),
+      el('h3', { text: 'Sector terms: assumed fee, measured multiple' }),
       el('div', { class: 'sector-table' },
         el('table', null,
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Fee on TVL' }), el('th', { scope: 'col', text: 'Multiple' }), el('th', { scope: 'col', text: 'Where the revenue comes from' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Assumed fee on TVL' }), el('th', { scope: 'col', text: 'Measured multiple' }), el('th', { scope: 'col', text: 'Evidence' }), el('th', { scope: 'col', text: 'Where the revenue comes from' }))),
           el('tbody', null, sectorRows)
         )
       )
@@ -415,8 +421,9 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Revenue at ' + (row.fee_bps / 100).toFixed(2) + '% of TVL' }), el('b', { class: 'num', text: fmtUsd(row.revenue_usd) })),
-        el('div', null, el('span', { text: 'Sector multiple' }), el('b', { class: 'num', text: row.multiple + 'x' })),
+        el('div', null, el('span', { text: 'Market multiple: mcap per $1 of TVL' }), el('b', { class: 'num', text: (Math.round(row.multiple * 100) / 100) + '×' })),
+        el('div', null, el('span', { text: 'Where that multiple comes from' }), el('b', { class: 'num sub', text: row.multiple_source || 'n/a' })),
+        el('div', null, el('span', { text: 'Book earnings a year at ' + (row.fee_bps / 100).toFixed(2) + '% of TVL (reference)' }), el('b', { class: 'num', text: fmtUsd(row.revenue_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
