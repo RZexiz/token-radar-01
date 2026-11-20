@@ -24,6 +24,7 @@
 // because no snapshot field carries a protocol's revenue.
 
 import { calibrateMultiples, fallbackMultiple, curveValue, CALIBRATION_PRIOR_SAMPLES, type CalibratedMultiple, type SizeCurve } from './calibrate.ts';
+import { farmEconomics, economicsHeadline, type FarmEconomics } from './farm.ts';
 
 /** A curve with no measurement behind it: callers fall back to the stated multiple. */
 const EMPTY_CURVE: SizeCurve = { intercept: 0, exponent: 1, samples: 0, medianApePct: 0, minTvl: 0, maxTvl: 0, degenerate: true };
@@ -216,9 +217,15 @@ export interface BoardRow {
     sector_note: string;
   };
   farm_steps: string[];
+  /** The position costed: every dollar out, and what the airdrop has to clear to break even. */
+  farm: FarmEconomics;
+  /** One sentence above the cost table, so the reader knows what the numbers are. */
+  farm_headline: string;
+  /** The numbered plan, carrying the same dollars the cost table shows. */
+  farm_steps: string[];
 }
 
-/** The dashboard's compact view of one row; the farm plan is derived in the page from the same inputs. */
+/** The dashboard's compact view of one row. The farm plan is carried, not re-derived: one implementation or the page and the board drift apart. */
 export interface RadarRow {
   rank: number;
   slug: string;
@@ -238,6 +245,10 @@ export interface RadarRow {
   tenure_multiplier: number;
   liquidity_multiplier: number;
   sector_note: string;
+  /** The position costed, so the page shows the same dollars board.json carries. */
+  farm: FarmEconomics;
+  /** One sentence above the cost table. */
+  farm_headline: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -401,7 +412,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
 
   const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian, calibrated.curve) }));
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map((s, i) => ({
+  return scored.map((s, i) => {
+    const farmEcon = farmEconomics(s.p.chains, s.p.tvl_usd, s.age, s.implied);
+    return ({
     rank: i + 1,
     slug: s.p.slug,
     name: s.p.name,
@@ -435,8 +448,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
             ? 'measured on ' + s.multipleSamples + ' live token' + (s.multipleSamples === 1 ? '' : 's') + ', shrunk toward the snapshot median'
             : 'measured on ' + s.multipleSamples + ' live tokens in this category',
     },
-    farm_steps: farmSteps(s.p, s.age, s.implied).map(stepText),
-  }));
+    farm_steps: farmSteps(s.p, s.age, s.implied, farmEcon).map(stepText),
+    farm: farmEcon,
+    farm_headline: economicsHeadline(farmEcon),
+  });
+  });
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
@@ -474,33 +490,34 @@ function holdDaysFor(age: number | null): number {
 function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
+  const amount = capital.toLocaleString('en-US');
   if (c.includes('lend') || c.includes('cdp') || c.includes('collateral'))
-    return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
+    return `Supply $${amount} of USDC to ${name} on ${chain} and keep the position open.`;
   if (c.includes('curator') || c.includes('allocator'))
-    return `Deposit $${capital} into a ${name} vault on ${chain} and keep the vault shares.`;
+    return `Deposit $${amount} into a ${name} vault on ${chain} and keep the vault shares.`;
   if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm'))
-    return `Provide $${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
+    return `Provide $${amount} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
   if (c.includes('chain'))
-    return `Bridge $${capital} of USDC to ${chain} and use ${name}'s own bridge and app for one swap.`;
+    return `Bridge $${amount} of USDC to ${chain} and use ${name}'s own bridge and app for one swap.`;
   if (c.includes('bridge'))
-    return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
+    return `Bridge $${amount} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
   if (c.includes('staking') || c.includes('restak'))
-    return `Stake $${capital} of the chain's staking asset through ${name} on ${chain} and keep the receipt.`;
+    return `Stake $${amount} of the chain's staking asset through ${name} on ${chain} and keep the receipt.`;
   if (c.includes('perpetual') || c.includes('derivative'))
-    return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
+    return `Deposit $${amount} of USDC as margin on ${name} and open one small hedge.`;
   if (c.includes('prediction'))
-    return `Fund $${capital} and place one market position on ${name}, then claim the resolved payout.`;
+    return `Fund $${amount} and place one market position on ${name}, then claim the resolved payout.`;
   if (c.includes('stable'))
-    return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain} and hold it.`;
+    return `Mint or deposit $${amount} of the stable asset through ${name} on ${chain} and hold it.`;
   if (c.includes('rwa'))
-    return `Mint $${capital} of the protocol's yield asset on ${chain} through ${name} and hold it.`;
+    return `Mint $${amount} of the protocol's yield asset on ${chain} through ${name} and hold it.`;
   if (c.includes('insurance'))
-    return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy open.`;
+    return `Buy $${amount} of cover from ${name} on ${chain} and keep the policy open.`;
   if (c.includes('basis'))
-    return `Deposit $${capital} of USDC into ${name} on ${chain} and let it run one funding cycle.`;
+    return `Deposit $${amount} of USDC into ${name} on ${chain} and let it run one funding cycle.`;
   if (c.includes('payment'))
-    return `Route $${capital} of a payment through ${name} on ${chain} and keep the receipt.`;
-  return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
+    return `Route $${amount} of a payment through ${name} on ${chain} and keep the receipt.`;
+  return `Deposit $${amount} of USDC into ${name} on ${chain} and keep the position open.`;
 }
 
 /**
@@ -508,32 +525,34 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
  * the protocol's own record (category, chains, TVL, age, and the implied value the model gives it),
  * never from a hand-written list of names.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null, implied: number): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, implied: number, econ: FarmEconomics): FarmStep[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
-  const hold = holdDaysFor(age);
-  const action = actionFor(p, capital, chain);
+  const hold = econ.hold_days;
+  const deposit = econ.deposit_usd;
   const chains = p.chains.length > 1 ? `${p.chains[0]} and ${p.chains[1]}` : chain;
   const worth = implied >= 5_000_000 ? 'a large book' : implied >= 500_000 ? 'a mid-size book' : 'a small book';
+  const entry = econ.costs[0]!;
+  const weekly = econ.costs[1]!;
+  const exit = econ.costs[2]!;
   return [
     {
       text: `Open a fresh wallet for ${p.name} alone, fund it on ${chains}, and keep the seed phrase offline.`,
-      cost: 'under $3 of gas for the first transaction',
+      cost: `about $${(entry.usd - (deposit * 0.5) / 100).toFixed(2)} of gas for the first transaction`,
       time: '5 minutes',
     },
     {
-      text: action,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
+      text: actionFor(p, deposit, chain),
+      cost: `${entry.basis}`,
       time: '15 minutes to set up',
     },
     {
       text: `Make one qualifying action each week: a deposit, a borrow, a swap or a vote on ${p.name}.`,
-      cost: 'about $2 of gas a week',
+      cost: weekly.basis,
       time: '10 minutes a week',
     },
     {
       text: `Hold for at least ${hold} days: ${p.name} is ${worth} at a $${Math.round(implied).toLocaleString('en-US')} implied value and a snapshot needs two months of history.`,
-      cost: `the $${capital} stays in the position`,
+      cost: `the $${deposit.toLocaleString('en-US')} stays in the position, and ${econ.costs[3]!.basis}`,
       time: `${hold} days`,
     },
     {
@@ -542,7 +561,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, implied: numb
       time: '10 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it cleanly.`,
+      text: `Unwind the position: ${exit.basis}.`,
+      cost: `$${exit.usd.toFixed(2)} to leave`,
+      time: '15 minutes',
+    },
+    {
+      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it cleanly. Total cost of the whole position is $${econ.cost_total_usd.toFixed(2)}, ${econ.hurdle_pct.toFixed(1)}% of the deposit.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },
@@ -587,6 +611,9 @@ export function radarRow(row: BoardRow): RadarRow {
     tenure_multiplier: row.model.tenure_multiplier,
     liquidity_multiplier: row.model.liquidity_multiplier,
     sector_note: row.model.sector_note,
+    farm: row.farm,
+    farm_headline: row.farm_headline,
+    farm_steps: row.farm_steps,
   };
 }
 

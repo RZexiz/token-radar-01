@@ -50,6 +50,32 @@ The fee figure is kept separate and labelled an assumption — no snapshot field
 protocol's revenue, so what a book would earn in a year is shown beside what it is worth, never
 mixed into the valuation.
 
+## What being present costs
+
+Most farm plans are a list of verbs. This one prices the position, and every line is arithmetic on an
+assumption printed next to it:
+
+| Cost | How it is arrived at |
+|---|---|
+| Enter the position | that chain's typical gas, plus 0.5% spread on the deposit |
+| Qualifying action, weekly | gas per action × the weeks the holding period runs |
+| Exit the position | gas again, plus the spread on the way out |
+| Capital locked | the deposit × a stated yield it could have earned elsewhere |
+
+The deposit is a tenth of a percent of the book, held inside a band a person would open without
+thinking twice. What comes out is a **cost of being present** in dollars, as a share of the deposit
+(`hurdle_pct`) and as rent per day (`cost_per_day_usd`) — and the verdict is derived from that rent,
+not from a return:
+
+- **cheap to hold** — under $2 a day; the cost does not decide whether to be present
+- **worth it only on a long hold** — $2 to $10 a day; the drop has to justify the rent
+- **too expensive to hold** — over $10 a day
+
+The snapshot carries no airdrop size, date or terms, so **no return is predicted**. This is the one
+number the board refuses to invent: an assumed airdrop would let any verdict be argued into any other,
+and a plan that can be tuned to say anything says nothing. What a reader gets instead is the cost they
+can check, and the fact that Ethereum is the one chain where this decision is actually expensive.
+
 ## Run it
 
 ```sh

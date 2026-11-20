@@ -119,48 +119,6 @@
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
-  function farmSteps(p) {
-    var chain = chainOf(p);
-    var capital = capitalFor(p);
-    var hold = holdDaysFor(p.age_days);
-    var chains = p.chains && p.chains.length > 1 ? p.chains[0] + ' and ' + p.chains[1] : chain;
-    var implied = p.implied_value_usd;
-    var worth = implied >= 5e6 ? 'a large book' : implied >= 5e5 ? 'a mid-size book' : 'a small book';
-    return [
-      {
-        text: 'Open a fresh wallet for ' + p.name + ' alone, fund it on ' + chains + ', and keep the seed phrase offline.',
-        cost: 'under $3 of gas for the first transaction',
-        time: '5 minutes'
-      },
-      {
-        text: actionFor(p, capital, chain),
-        cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas',
-        time: '15 minutes to set up'
-      },
-      {
-        text: 'Make one qualifying action each week: a deposit, a borrow, a swap or a vote on ' + p.name + '.',
-        cost: 'about $2 of gas a week',
-        time: '10 minutes a week'
-      },
-      {
-        text: 'Hold for at least ' + hold + ' days: ' + p.name + ' is ' + worth + ' at a ' + fmtUsd(implied) +
-          ' implied value and a snapshot needs two months of history.',
-        cost: 'the $' + capital + ' stays in the position',
-        time: hold + ' days'
-      },
-      {
-        text: "Check " + p.name + "'s own points or rewards page before you withdraw, and claim only from the link it publishes itself.",
-        cost: 'no fee to check, and never pay to claim',
-        time: '10 minutes'
-      },
-      {
-        text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it cleanly.',
-        cost: 'nothing but the log',
-        time: '5 minutes'
-      }
-    ].map(stepText);
-  }
-
   function readHash() {
     var hash = window.location.hash.replace(/^#/, '');
     if (!hash) return;
@@ -407,7 +365,9 @@
     state.selected = slug;
     writeHash();
     dialog.textContent = '';
-    var steps = farmSteps(row);
+    // Carried from board.json, not recomputed: a second implementation in the page is how the plan
+    // and the cost table end up quoting different deposits.
+    var steps = row.farm_steps || [];
     var recomputed = impliedOf(row, DATA.model);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
@@ -445,6 +405,42 @@
         return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
       }))
     ));
+    // The costed position. Read from data.js, never recomputed here: the page and board.json have to
+    // agree on the dollars, and a second implementation is how they stop agreeing.
+    if (row.farm) {
+      var f = row.farm;
+      var head = el('p', { class: 'sub', text: row.farm_headline || '' });
+      var rowsCost = f.costs.map(function (c) {
+        return el('tr', null,
+          el('td', { text: c.label }),
+          el('td', { class: 'num', text: fmtUsd(c.usd) }),
+          el('td', { class: 'sub', text: c.basis })
+        );
+      });
+      var verdictText = f.verdict === 'farm' ? 'Cheap to hold' : f.verdict === 'thin' ? 'Worth it only on a long hold' : 'Too expensive to hold';
+      dialog.appendChild(el('section', { class: 'detail-section' },
+        el('h3', { text: 'Cost of being present' }),
+        head,
+        el('table', { class: 'cost-table' },
+          el('thead', null, el('tr', null,
+            el('th', { text: 'Cost' }), el('th', { class: 'num', text: 'Dollars' }), el('th', { text: 'How it is arrived at' })
+          )),
+          el('tbody', null, rowsCost,
+            el('tr', { class: 'total' },
+              el('td', { text: 'Total cost of the position' }),
+              el('td', { class: 'num', text: fmtUsd(f.cost_total_usd) }),
+              el('td', { class: 'sub', text: f.hurdle_pct.toFixed(1) + '% of the ' + fmtUsd(f.deposit_usd) + ' deposit, ' + fmtUsd(f.cost_per_day_usd) + ' a day over ' + f.hold_days + ' days' })
+            )
+          )
+        ),
+        el('p', { class: 'sub' },
+          el('b', { text: verdictText + '. ' }),
+          el('span', { text: f.verdict_reason })
+        ),
+        el('p', { class: 'sub', text: 'Every number above is arithmetic on a stated assumption: the chain fee is that chain\'s typical plain transaction, the spread is ' +
+          '0.5% each way, and the capital charge is ' + f.yield_assumption_pct + '% a year it could have earned elsewhere. The snapshot carries no airdrop size, date or terms, so no return is predicted here — only what being present costs.' })
+      ));
+    }
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
     } else {
