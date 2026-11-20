@@ -23,7 +23,10 @@
 // and only thin sectors fall back toward the snapshot median. The fee stays a stated sector assumption,
 // because no snapshot field carries a protocol's revenue.
 
-import { calibrateMultiples, fallbackMultiple, CALIBRATION_PRIOR_SAMPLES, type CalibratedMultiple } from './calibrate.ts';
+import { calibrateMultiples, fallbackMultiple, curveValue, CALIBRATION_PRIOR_SAMPLES, type CalibratedMultiple, type SizeCurve } from './calibrate.ts';
+
+/** A curve with no measurement behind it: callers fall back to the stated multiple. */
+const EMPTY_CURVE: SizeCurve = { intercept: 0, exponent: 1, samples: 0, medianApePct: 0, minTvl: 0, maxTvl: 0, degenerate: true };
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -76,7 +79,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by score. */
 export const EARLY_ROWS = 160;
@@ -296,6 +299,7 @@ export function impliedValue(
   model: ModelConstants,
   calibration?: Map<string, CalibratedMultiple> | null,
   snapshotMedian = 0,
+  curve?: SizeCurve | null,
 ): {
   implied: number;
   revenue: number;
@@ -315,7 +319,10 @@ export function impliedValue(
   // ratio, mcap / tvl, needs no fee assumption: the market has already priced the book. The sector table's
   // figure is the fallback only when the snapshot holds no live protocol in the category to measure on.
   const measured = protocol.category !== null ? calibration?.get(protocol.category) : undefined;
-  const multiple = measured !== undefined ? measured.multiple : fallbackMultiple(snapshotMedian, terms.multiple);
+  const multiple =
+    measured !== undefined
+      ? measured.multiple
+      : fallbackMultiple(curve ?? EMPTY_CURVE, snapshotMedian, terms.multiple, protocol.tvl_usd);
   const age = ageDays(asOf, protocol.listed_at);
   // The book's own earnings, at the sector's stated fee: a reference figure the row prints, not the
   // multiplier path. It answers "what would this book earn a year", separate from "what is it worth".
@@ -332,7 +339,11 @@ export function impliedValue(
     Math.min(Math.log10(tvlRatio) / Math.log10(model.liquidity_ref_usd / 1_000_000), 1) * model.liquidity_range;
   // Value = the book, priced at what its own sector's live tokens are worth per dollar of TVL, adjusted for
   // how fast the book is growing, how long it has held it, and how much of it could actually be traded.
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * tenureMult * liquidityMult));
+  // With a fitted size curve the value IS the curve's reading at this book's size: the curve already
+  // prices TVL (it was fitted against mcap, not against a constant multiple), so multiplying by TVL
+  // again would count the book twice — the bug that made a $254M book outrank a $2.75B one.
+  const base = curve && !curve.degenerate ? curveValue(curve, protocol.tvl_usd) : protocol.tvl_usd * multiple;
+  const implied = Math.max(1, Math.round(base * growthMult * tenureMult * liquidityMult));
   return {
     implied,
     revenue,
@@ -383,12 +394,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   // protocol is never displaced by an early one.
   const early = snapshot.protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .map((p) => ({ p, implied: impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian).implied }))
+    .map((p) => ({ p, implied: impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian, calibrated.curve).implied }))
     .sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1))
     .slice(0, EARLY_ROWS);
   for (const e of early) chosen.set(e.p.slug, e.p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian) }));
+  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model, calibration, snapshotMedian, calibrated.curve) }));
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
     rank: i + 1,
